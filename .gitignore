@@ -1,0 +1,6 @@
+# 本机/编辑器配置（含绝对路径与 stub 版本号，各机器不同）
+.vscode/settings.json
+
+# Python
+__pycache__/
+*.py[cod]
