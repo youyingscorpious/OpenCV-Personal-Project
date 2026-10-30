@@ -1,0 +1,126 @@
+# =============================================================================
+# voyager_gate 参数文件（VOYAGER_NEW2 增量）
+#
+# !! 重要 !!
+# 1. 通信参数区块与原包 config/navigation.yaml 逐项一致，未做任何改动：
+#    端口 5000 / 串口 ttyUSB0·1·2 / 波特率 115200 / AA55+CRC16(电控) /
+#    AA55+SUM8(视觉) 全部沿用原约定。
+# 2. 节点名仍是 robopioneers_navigation（继承自原 NavigationNode），
+#    参数必须写在这个 key 之下。
+# 3. 路口闸门 9 个参数 + VOYAGER_NEW2 新增 vision_inline_* 5 个参数，
+#    全部带默认值，不写也能跑；默认 vision_inline_enabled=false，
+#    行为与 VOYAGER_NEW 原版逐字段一致。
+# =============================================================================
+robopioneers_navigation:
+  ros__parameters:
+
+    # ---------------- 通信参数（沿用原包，禁止改动） ----------------
+    motor_port: /dev/ttyUSB0
+    servo_port: /dev/ttyUSB1
+    motor_baud: 115200
+    servo_baud: 115200
+    motor_profile: core_crc16
+    vision_transport: udp
+    vision_host: 192.168.4.1
+    vision_port: 5000
+    vision_udp_bind_address: 0.0.0.0
+    vision_udp_bind_port: 5000
+    vision_port_device: /dev/ttyUSB2
+    vision_baud: 115200
+
+    # ---------------- 原包功能参数（沿用原值） ----------------
+    motor_status_is_measured: true
+    motor_line_base_speed_mm_s: 150
+    motor_line_turn_limit_mm_s: 300
+    stopped_samples_required: 3
+    stopped_speed_threshold: 10
+    stopped_dwell_seconds: 0.5
+    motor_stop_timeout_seconds: 5.0
+    arm_action_timeout_seconds: 15.0
+    vision_source_timeout_seconds: 0.6
+    vision_link_timeout_seconds: 1.5
+
+    # ---------------- 本包新增：路口定角转向（方案 A） ----------------
+    route_turn_enabled: true
+    route_angle_left_deg: -40.0
+    route_angle_mid_deg: 0.0
+    route_angle_right_deg: 40.0
+    route_heading_sign: 1.0
+    route_turn_speed_mm_s: 120
+    route_turn_tolerance_deg: 3.0
+    route_turn_timeout_s: 4.0
+    route_turn_settle_s: 0.25
+    route_junction_color_wait_s: 8.0
+    route_turn_on_color_without_junction: false
+    route_junction_ignore_s: 3.0
+    route_junction_hold_hz: 20.0
+    route_junction_hold_enable: true
+
+    # ---------------- 本包新增：STOP 定距停车 ----------------
+    stop_delay_mm: 0.0
+    stop_delay_timeout_s: 3.0
+    refresh_zero_in_wait_stop: false
+
+    # ---------------- 本包新增：路口「停车 → 色卡识别」闸门 ----------------
+    junction_gate_enabled: true
+    junction_stop_confirm_samples: 3
+    junction_stop_confirm_dwell_s: 0.25
+    junction_stop_confirm_timeout_s: 2.0
+    junction_stop_confirm_timeout_action: proceed
+    route_color_require_after_stop: true
+    route_color_vote_frames: 3
+    route_color_vote_timeout_s: 0.6
+    route_color_reject_log_hz: 2.0
+
+    # ---------------- VOYAGER_NEW2 增量：同进程 import nav_vision ----------------
+    # 总开关；false = 完全沿用原 UDP 5000 板端直发编号链路（与原版一致）。
+    # true  = 本节点进程内 sys.path.insert(vision_module_path) + import nav_vision，
+    #         后台线程收 UDP 5002 图像流，30 ms 轮询 nv.color()/nv.stop()。
+    vision_inline_enabled: false
+    # nav_vision.py 所在目录（不是包名）。例：
+    #   /home/robot/ws/src/vision_nav/导航用的
+    vision_module_path: ''
+    # 轮询周期（秒）。视觉后台线程自己跑，这里只是读结果槽的频率。
+    vision_poll_period_s: 0.03
+    # color() 连续返回 "fuck" 多少次后进 FAULT；0 = 只告警不 fault。
+    # !! 赛场请保持 >= 5。B2 胶水每 30 ms 喂一次 vision_last_any，
+    # 父类原本 1.5 s 的视觉看门狗被永久屏蔽，视觉安全只剩这一道计数：
+    # 设成 0 = 相机全死也不停车。未开赛前不计数（P1），不会把节点锁死。
+    vision_stream_lost_fault: 5
+    # stop()=="1" 时屏蔽当帧 color()，防止红色 STOP 牌被当成红色色卡。
+    vision_suppress_color_on_stop: true
+    # VISION_STATUS 诊断发布频率（Hz）。
+    vision_status_log_hz: 1.0
+
+# =============================================================================
+# 视觉桥接节点（仅当 start_vision_bridge:=true 时使用；inline 模式不需要）
+# =============================================================================
+vision_bridge:
+  ros__parameters:
+
+    vision_source: auto
+    vision_module_path: ''
+    stub_color: 1
+    stub_stop: false
+
+    bridge_transport: udp
+    bridge_host: 127.0.0.1
+    bridge_port: 5000
+    bridge_serial_device: /dev/ttyUSB2
+    bridge_serial_baud: 115200
+
+    publish_rate_hz: 20.0
+    version_rate_hz: 1.0
+
+    vision_role: 1
+    emit_role2_shim: true
+    shim_role: 2
+
+    suppress_color_on_stop: true
+    color_confidence: 255
+    stop_on_fault: true
+    calibrated_bit: true
+    protocol_major: 1
+    protocol_minor: 0
+    firmware_major: 1
+    firmware_minor: 0
