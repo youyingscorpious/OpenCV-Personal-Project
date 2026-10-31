@@ -1,140 +1,159 @@
-# VOYAGER_NEW2 · 在原闸门包上增量接入同进程视觉
+# VOYAGER_NEW · 路口「停车 → 色卡识别」闸门（方案 A）
 
-> 本目录是 `VOYAGER_NEW` 的**副本 + 增量**。原 `VOYAGER_NEW/` 一个字节都没改。
-> 本文档经三轮代码 review 后重写，把每一轮发现的硬阻塞、修法和残留风险全部写明。
+> 在**电机循迹完成（到达三岔路口）之后、色卡识别结果被采信之前**，由导航端先向电控端
+> 下发停车、取得停稳证据，再打开一个受限的识别窗口，投票锁定颜色后才允许转向。
+>
+> 约束：**不修改 `robopioneers_navigation` 任何文件、不修改任何通信参数、不新增电控命令字。**
+>
+> 本目录含一个**可直接 `colcon build`** 的 ROS 2 功能包 `voyager_gate/`。
 
-## 一、和原版的差异
+---
 
-| 项 | VOYAGER_NEW（原版） | VOYAGER_NEW2（本目录） |
+## 一句话结论
+
+现有代码里「停车」这一半已经有了，「停稳后才采信颜色」这一半没有：
+
+| 环节 | 现状（改造前） | 位置 |
 |---|---|---|
-| 视觉来源 | 板端识别 → UDP 5000 发 AA55 编号帧 | 板端发 JPEG → PC 进程内 `nav_vision` 识别 |
-| 视觉进程 | 无（板端在另一块板上算） | 同进程后台 daemon 线程（`pc_receiver` 收 UDP 5002） |
-| 新增文件 | — | `voyager_gate/voyager_gate/vision_adapter.py` |
-| 修改文件 | — | `voyager_node.py`、`launch`、`yaml`、`package.xml`、`__init__.py` |
-| 闸门 G0–G4 | — | **一行没动**（`junction_gate.py` 字节级保留） |
-| 定角转向 / STOP 定距 | — | **一行没动**（`competition_base.py` 字节级保留） |
-| 默认行为 | — | `vision_inline_enabled=false`，与原版逐字段一致 |
+| 电机循迹完成 → 上报路口 | 固件 `0x11` event bit0 / `0x10` state=6 | [navigation_node.py:714](../robopioneers_navigation/robopioneers_navigation/navigation_node.py#L714) |
+| 导航 → 电控 停车帧 | `CMD_CHASSIS(0,0)` + 20 Hz 零速保持 | [navigation_node.py:1185](../robopioneers_navigation/robopioneers_navigation/navigation_node.py#L1185) |
+| 停稳证据 | 只在 `WAIT_MOTOR_STOP`（STOP 牌）用，路口不用 | [navigation_node.py:688](../robopioneers_navigation/robopioneers_navigation/navigation_node.py#L688) |
+| 色卡识别 | 行进中就被锁进 `selected_route` | [route_controller.py:253](../robopioneers_competition/robopioneers_competition/route_controller.py#L253) |
+| 转向 | `selected_route` 非空就立刻转 | [route_controller.py:329](../robopioneers_competition/robopioneers_competition/route_controller.py#L329) |
 
-## 二、三轮 review 修了什么
+本方案补的正是后三行。
 
-### 第一轮：三个硬阻塞（B1/B2/F1）
+---
 
-对照父类 `navigation_node.py` 源码发现：
+## 时序（改造后）
 
-| 问题 | 现象 | 修法 |
-|---|---|---|
-| **B1** `/navigation/start` 拒赛 | 父类 `:278` 要求 `vision_roles == {1,2}`，inline 不发 AA55 VERSION 帧 → 永远 `got []` | `_vision_init` 末尾 `vision_roles={1,2}; vision_enabled=True` |
-| **B2** 开赛后第一个 tick 就 FAULT | 父类 `:1113` 要求 `vision_last_any` 1.5s / `vision_last_seen[(1,0x01)]` 0.6s 内刷新，inline 不发 AA55 → 恒为 0 | 每 30ms tick 喂这两个时间戳 |
-| **F1** 多帧投票被架空 | `nav_vision` 结果槽 0.5s 保鲜，30ms 轮询把同一帧读 16 次，3 票在 90ms 内凑齐 | 按 `nv.status()['last_color_age_ms']` 边沿触发：age 变小才算新帧 |
-
-### 第二轮：六个新问题（P1–P6）
-
-修好 B1/B2/F1 后，离线仿真又发现：
-
-| 问题 | 现象 | 修法 |
-|---|---|---|
-| **P1** 启动顺序锁死 ⚠️ | `nv.start()` 在节点构造时就置 `_started_ts`，板端 2s 内没出图 → `color()="fuck"` → 5 个 tick 后 `_fault()` → `_fault` 把 `started=True`（`:1133`）→ 之后 `/navigation/start` 永远返回 `already started: FAULT`，只能重启节点 | `color()=="fuck"` 且 `not self.started` 时不计数、不 fault，只把 `color_raw` 压成 `"0"`；未开赛前车不会动，跳过没有安全损失 |
-| **P2** `_fault` 不 latch | 计数器只增不减，条件一旦成立永远成立 → 33Hz 反复 `_fault()`，每帧给两个串口发 `CMD_ESTOP`、反复 `_dispatch('FAULT')` | fault 条件加 `and self.state != 'FAULT'`，只 fault 一次 |
-| **P3** 错误提示误导 | import 失败时提示"回退到原 UDP 5000 链路"，但本部署板端只发 JPEG，根本没有这条链路；且 B1 seed 也不跑，表现像板子没上电 | 文案改成实话：没有后备链路，此时 `/navigation/start` 会因 `vision_roles` 为空被拒 |
-| **P4** `_reset_vision_session()` 清掉 seed | UDP `OSError` 时父类会 `clear()` `vision_roles`，而 B1 seed 只在 `_vision_init` 跑过一次 | 每 tick 重新断言 `if vision_roles != {1,2}: vision_roles = {1,2}` |
-| **P5** `status()` 异常 → 投票失效 | `color_age_ms` 取不到时走"新帧"分支，退化成每 tick 一票，F1 保护消失 | `color_age_ms is None` 时 `is_new_color_frame = False`，宁可晚锁不要乱锁 |
-| **P6** `vision_stream_lost_fault: 0` 现在危险 | B2 胶水让父类 1.5s/0.6s 看门狗永久失效，0 = 相机全死也不停车 | **不要设 0**；保持默认 5，或至少 3 |
-
-## 三、新增的 6 个参数
-
-| 参数 | 默认 | 含义 |
-|---|---|---|
-| `vision_inline_enabled` | `false` | 总开关。true = 本进程内 import nav_vision |
-| `vision_module_path` | `''` | `nav_vision.py` 所在目录（launch 里叫 `vision_inline_module_path`） |
-| `vision_poll_period_s` | `0.03` | 轮询周期 |
-| `vision_stream_lost_fault` | `5` | `color()` 连续 `"fuck"` 几次后进 FAULT。**不要设 0**（见 P6） |
-| `vision_suppress_color_on_stop` | `true` | `stop()=="1"` 时屏蔽当帧 color，防红色 STOP 牌误判红卡 |
-| `vision_status_log_hz` | `1.0` | VISION_STATUS 诊断发布频率 |
-
-## 四、怎么跑
-
-### 1. 离线闸门自检
-
-```bash
-python3 VOYAGER_NEW2/voyager_gate/tools/gate_selftest.py
-# 期望：13/13 checks passed / ALL SCENARIOS PASSED
+```
+电机固件：全黑路口 → 本地刹停 → 0x10 state=6 / 0x11 event bit0
+        │
+        ▼
+导航：JUNCTION_DETECTED → WAIT_ROUTE_MANEUVER
+        │  ① 下发 CMD_CHASSIS(0,0)          ← 你要的"一条通信"
+        │  ② 20 Hz 零速保持（喂 300 ms 看门狗）
+        ▼
+   闸门 G1 ARMING：等 0x10 实测左右轮速归零 ×N 帧 + 驻留 dwell
+        │  ③ JUNCTION_STOP_CONFIRMED
+        ▼
+   闸门 G2 OPEN：COLOR_WINDOW_OPEN          ← 语义上的"调用色卡识别模块"
+        │  ④ 窗口内连续 M 帧同色 → 投票锁定
+        ▼
+   闸门 G3 LOCKED：ROUTE_COLOR_READY
+        │  ⑤ 定角转向（heading_deg 开环）
+        ▼
+   闸门 G4 DONE：ROUTE_TURN_REACHED → ROUTE_FOLLOW
 ```
 
-注意：这个自检**不 import vision_adapter**，通过只说明闸门没坏，不证明 inline 链路通。
+```mermaid
+stateDiagram-v2
+    [*] --> G0_CLOSED: LINE_FOLLOW 行进中
+    G0_CLOSED --> G1_ARMING: 路口事件 / 状态6
+    G0_CLOSED --> G1_ARMING: 颜色帧（fallback 开启时）
+    G1_ARMING --> G2_OPEN: 停稳证据达标
+    G1_ARMING --> G2_OPEN: 停稳确认超时 + proceed
+    G1_ARMING --> FAULT: 停稳确认超时 + fault
+    G2_OPEN --> G3_LOCKED: M 帧同色投票通过
+    G2_OPEN --> FAULT: 颜色等待窗口耗尽
+    G3_LOCKED --> G4_DONE: 定角转向完成
+    G4_DONE --> G0_CLOSED: 进入 ROUTE_FOLLOW
+```
 
-### 2. 仍然用原方案（板端直发编号）
+关键性质：**G0 / G1 阶段收到的颜色帧一律丢弃，既不记录也不投票。**
+
+---
+
+## 快速开始
 
 ```bash
+# 1) 与原件放进同一工作空间（原件不改动）
+cp -r robopioneers_navigation  ~/ws/src/
+cp -r VOYAGER_NEW/voyager_gate ~/ws/src/
+
+# 2) 离线算法自检（不需要 ROS / 硬件）
+python3 VOYAGER_NEW/03_参考实现.py
+#   期望：13/13 checks passed / ALL SCENARIOS PASSED
+
+# 3) 构建并运行
+cd ~/ws
+colcon build --packages-select robopioneers_navigation voyager_gate
+source install/setup.bash
 ros2 launch voyager_gate voyager_gate.launch.py
 ```
 
-### 3. 启用同进程视觉
-
 ```bash
-ros2 launch voyager_gate voyager_gate.launch.py \
-    vision_inline_enabled:=true \
-    vision_inline_module_path:=/home/scurry/Desktop/VOYAGER_WS/VISION/VISION_WS_doc/src
-```
-
-板端跑 `board_main.py`（只发 CSI2 JPEG 到 UDP 5002）。PC 端 `pip install opencv-python numpy`。
-**同一台 PC 不要同时跑 `main.py` 调试**（UDP 5001/5002 会被抢，且 `pc_receiver` 没设 `SO_REUSEADDR`，inline 和 bridge 不能共存）。
-
-### 4. 观测
-
-```bash
+# 观察相位（应依次出现）
 ros2 topic echo /navigation/competition/status
+# JUNCTION_PARKED → JUNCTION_STOP_CONFIRMED → COLOR_WINDOW_OPEN
+#   → ROUTE_COLOR_READY → ROUTE_TURN_BEGIN → ROUTE_TURN_REACHED → ROUTE_FOLLOW
+
+# 识别窗口开关信号
+ros2 topic echo /navigation/junction/color_request
 ```
 
-inline 模式每秒一条：
-```
-VISION_STATUS  fps=25.0 frame_age=40ms color=1 stop=0 err=None
-```
+详细步骤见 [`voyager_gate/README.md`](voyager_gate/README.md)。
 
-## 五、调用链
+---
+
+## 三个判据（摘要）
+
+**① 停稳证据**（一帧算「停」当且仅当）
 
 ```
-庐山派 CSI2 640×480 JPEG
-   │ UDP 5002
-   ▼
-nav_vision 后台线程（本进程内，daemon）
-   ├─ color_core → slot.set("1"/"2"/"3"/"0")
-   └─ stop_sign_core → slot.set("1"/"0")
-   │
-   │  30 ms 定时器 _vision_tick()
-   │  ├─ B2：vision_last_any / vision_last_seen[(1,0x01)] = now
-   │  ├─ P4：每 tick 重断言 vision_roles == {1,2}
-   │  ├─ P1：not started 时 fuck 不计数（板端开机慢不算故障）
-   │  ├─ P2：state==FAULT 后不再重复 fault
-   │  ├─ stop 边沿触发 → _request_motor_stop()
-   │  └─ F1+P5：age 变小 且 age 非 None 才算新帧
-   ▼
-nv.color() == "1"/"2"/"3" 且 is_new_color_frame
-   → self._select_route(int(c))
-        ↓ 共用闸门投票（I2/I3 不变量仍生效）
-        ↓ 连续 3 次独立识别同色 → selected_route = c
+fresh(Δt ≤ 0.25 s) ∧ state ∈ {0 IDLE, 6 JUNCTION} ∧ |v_L| ≤ thr ∧ |v_R| ≤ thr
 ```
 
-## 六、残留风险（上车前必读）
+连续 N 帧满足 **且** 从首帧起已过 `dwell` 秒 → 确认停稳。
 
-1. **胶水是在和父类看门狗对话**：B1/B2/P4 的字段写入绕过了 AA55 协议握手。
-   如果日后父类升级加了新的握手校验，这里要跟着加。嫌脏就用退路（见下）。
-2. **退路：直接用 vision_bridge**。原包 `robopioneers_competition` 已实现完整的
-   AA55 桥（VERSION 握手 + role2 shim + TARGET_LIST 推送），一行胶水都不用写：
-   ```bash
-   ros2 launch voyager_gate voyager_gate.launch.py \
-       start_vision_bridge:=true vision_source:=nav_vision \
-       vision_module_path:=/home/robot/ws/src/vision_nav/导航用的
-   ```
-   这时 `vision_inline_enabled` 保持 false，本包这层 adapter 完全不工作。
-   代价是多一个节点进程，但 B1/B2 天然满足；F1 要在 bridge 侧按帧去重。
-3. **启动顺序**：补了 P1 之后，先 `ros2 launch` 后上电也不会锁死了（未开赛不计数）。
-   但仍建议先让板端出图、`VISION_STATUS` 心跳稳定后再 `/navigation/start`。
-4. **两个路径参数别填错**：launch 参数 `vision_inline_module_path`（给 inline）
-   vs `vision_module_path`（给 bridge），名字太像。填错的表现是 import 失败 +
-   `/navigation/start` 返回 `got []`。
-5. **红色 STOP 牌 ≠ 红色色卡**：`suppress_color_on_stop=true` 已在 stop=="1"
-   的当帧屏蔽 color，但 STOP 牌刚消失的几帧仍可能漏出红卡。
-6. **`vision_stream_lost_fault` 不要设 0**（P6）：B2 胶水让父类视觉看门狗永久
-   失效，0 = 相机全死也不停车。保持默认 5。
-7. **13/13 自检不算 inline 的证据**：`gate_selftest.py` 不 import `vision_adapter`。
-   inline 链路必须上车台架看到 `VISION_STATUS` 心跳和 `ROUTE_COLOR_READY` 才算通。
+**② 识别窗口** —— 不是时间区间，而是状态谓词：
+
+```
+window_open ⟺ state == WAIT_ROUTE_MANEUVER ∧ stop_confirmed
+```
+
+等价于 `[t_confirm, t_confirm + route_junction_color_wait_s]`，但不需要额外定时器。
+
+**③ 颜色锁定**
+
+```
+vote(c_k) ↑  若 c_k == c_{k-1} 且 (t_k − t_{k−1}) ≤ vote_timeout
+lock         若 vote ≥ M
+else reset   颜色变化 或 超时
+```
+
+---
+
+## 目录
+
+```
+VOYAGER_NEW/
+├── README.md                 # 本文件：结论 + 快速开始
+├── 01_算法设计.md            # 不变量、闸门相位、三个判据、时序预算、降级矩阵、参数
+├── 02_改动清单.md            # 手工合并回 robopioneers_competition 时用的逐函数清单
+├── 03_参考实现.py            # 可执行入口（转调包内离线自检）
+├── 04_验证与标定.md          # 台架复现、上车步骤、日志判读、参数标定、故障演练
+├── 05_风险与回退.md          # 风险矩阵、方案 B 对比、三级回退
+└── voyager_gate/             # ★ 可直接 colcon build 的 ROS 2 功能包
+    ├── package.xml / setup.py / setup.cfg / resource/
+    ├── README.md             # 包说明：构建、运行、参数、观测
+    ├── config/voyager_gate.yaml
+    ├── launch/voyager_gate.launch.py
+    ├── tools/gate_selftest.py
+    └── voyager_gate/
+        ├── junction_gate.py      # 闸门判据实现
+        ├── competition_base.py   # 模板副本：定角转向 + STOP 定距
+        └── voyager_node.py       # 接线后的可执行节点（唯一入口）
+```
+
+---
+
+## 兼容性与回退
+
+- 新增 9 个参数，全部带默认值，YAML 不写也能跑。
+- 新增 1 个话题 `/navigation/junction/color_request`（`std_msgs/Bool`），原有话题一个不动。
+- `junction_gate_enabled: false` → 关闸门（保留投票）；
+  再加 `route_color_vote_frames: 1` → **与改造前逐字段一致**。
+- 不改 `robopioneers_navigation/` 一个字节；不改端口 `5000/5001/5002`、
+  串口 `ttyUSB0·1·2`、波特率 `115200`、两套帧格式。
