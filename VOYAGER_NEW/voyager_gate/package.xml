@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>voyager_gate</name>
+  <version>2.0.0</version>
+  <description>
+    路口「停车 → 色卡识别」闸门（方案 A）：在电机循迹完成、色卡识别结果被采信之前，
+    先由导航端下发停车、取得停稳证据，再打开受限的识别窗口，投票锁定颜色后才允许转向。
+    VOYAGER_NEW2 增量：可选 vision_inline_enabled 同进程 import nav_vision，
+    不再依赖板端把识别好的编号发到 UDP 5000。
+    不修改 robopioneers_navigation 任何文件，不修改任何通信参数，不新增电控命令字。
+  </description>
+  <maintainer email="team@example.com">Robopioneers Navigation Team</maintainer>
+  <license>Proprietary</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <exec_depend>python3-serial</exec_depend>
+
+  <!-- 唯一硬依赖：本包通过继承其 NavigationNode 实现扩展，不复制、不改写原文件。 -->
+  <exec_depend>robopioneers_navigation</exec_depend>
+
+  <!-- 可选：台架联调想复用 PC 端视觉桥接时才会用到（上车板端直发时不需要）。 -->
+  <exec_depend>robopioneers_competition</exec_depend>
+
+  <!-- VOYAGER_NEW2 增量：vision_inline_enabled=true 时才需要（PC 端解码 JPEG 用）。 -->
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

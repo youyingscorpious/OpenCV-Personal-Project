@@ -1,0 +1,48 @@
+# ROS 2 节点参数文件：硬件串口和视觉链路可按实际设备调整。
+robopioneers_navigation:
+  # 声明该节点启动时读取的参数集合。
+  ros__parameters:
+    # 电机单片机 UART 设备；根据 udev 或 ls /dev/serial/by-id 调整。
+    motor_port: /dev/ttyUSB0
+    # 舵机单片机 UART 设备；必须与电机 UART 为不同设备。
+    servo_port: /dev/ttyUSB1
+    # 电机单片机 UART 波特率。
+    motor_baud: 115200
+    # 舵机单片机 UART 波特率。
+    servo_baud: 115200
+    # 使用新版第三版电机固件的 AA55 CRC16 协议，循迹由电机板本地 PID 执行。
+    motor_profile: core_crc16
+    # 匹配 Communication_comm.py 的默认 UDP；可切换为 tcp 或 serial。
+    vision_transport: udp
+    # 仅 TCP 模式使用的视觉服务端地址；手机热点 UDP 模式不读取此项。
+    vision_host: 192.168.4.1
+    # 视觉 TCP 服务端口。
+    vision_port: 5000
+    # UDP 本地接收绑定地址；0.0.0.0 监听所有网卡并可接收热点单播报文。
+    vision_udp_bind_address: 0.0.0.0
+    # UDP 监听端口；与视觉通信模块 peer_port=5000 对应。
+    vision_udp_bind_port: 5000
+    # 视觉 USB-UART 设备，仅视觉传输模式为 serial 时使用。
+    vision_port_device: /dev/ttyUSB2
+    # 视觉 USB-UART 波特率，仅视觉传输模式为 serial 时使用。
+    vision_baud: 115200
+    # 第三版电机固件状态帧速度来自左右轮编码器实测值。
+    motor_status_is_measured: true
+    # 电机板本地 LINE PID 的基础速度，单位 mm/s，固件会限制到 100..800。
+    motor_line_base_speed_mm_s: 150
+    # 电机板本地 LINE PID 的转向修正限幅，单位 mm/s，固件会限制到 50..600。
+    motor_line_turn_limit_mm_s: 300
+    # 连续多少帧实测零速反馈后才允许启动机械臂。
+    stopped_samples_required: 3
+    # 允许判定为零速的绝对速度阈值，单位必须与 MCU 状态帧保持一致。
+    stopped_speed_threshold: 10
+    # 实测零速需持续的最短时间，单位秒。
+    stopped_dwell_seconds: 0.5
+    # 等待电机停稳确认的超时，超时后禁止舵机动作。
+    motor_stop_timeout_seconds: 5.0
+    # 单个机械臂动作等待 MCU BUSY->DONE 的最长秒数。
+    arm_action_timeout_seconds: 15.0
+    # 相机 1 目标列表超时，兼容 20 Hz 限频和短时 UDP 丢包。
+    vision_source_timeout_seconds: 0.6
+    # 整条视觉链路超时，留出 1 Hz 自动心跳的调度余量。
+    vision_link_timeout_seconds: 1.5

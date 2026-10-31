@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<!-- XML 声明：此文件描述 ROS 2 包的元数据与依赖。 -->
+<package format="3">
+  <!-- 包名：与 ROS 2 的 ros2 run 命令保持一致。 -->
+  <name>robopioneers_navigation</name>
+  <!-- 包版本：本实现的初始版本。 -->
+  <version>0.1.0</version>
+  <!-- 包描述：双电控串口、视觉链路和赛程状态机。 -->
+  <description>Robopioneers competition navigation state machine and UART links</description>
+  <!-- 维护者：此处可替换为小组联系信息。 -->
+  <maintainer email="navigation@example.com">Robopioneers Navigation Group</maintainer>
+  <!-- 许可证：按项目需要调整。 -->
+  <license>MIT</license>
+  <!-- 构建工具：使用 ROS 2 Python 包构建系统。 -->
+  <buildtool_depend>ament_python</buildtool_depend>
+  <!-- ROS 2 Python 客户端库：提供节点、定时器和服务。 -->
+  <exec_depend>rclpy</exec_depend>
+  <!-- 标准字符串消息：发布结构化视觉数据与状态信息。 -->
+  <exec_depend>std_msgs</exec_depend>
+  <!-- 标准服务：提供赛前启动流程的触发接口。 -->
+  <exec_depend>std_srvs</exec_depend>
+  <!-- Python 串口库：同时管理电机和舵机两路 UART。 -->
+  <exec_depend>python3-serial</exec_depend>
+  <!-- ROS 2 launch 运行依赖：启动文件使用。 -->
+  <exec_depend>launch</exec_depend>
+  <!-- ROS 2 launch 节点描述依赖：启动文件使用。 -->
+  <exec_depend>launch_ros</exec_depend>
+  <!-- 包导出信息：标记为 ament_python 包。 -->
+  <export>
+    <!-- ament Python 构建类型声明。 -->
+    <build_type>ament_python</build_type>
+  </export>
+</package>
