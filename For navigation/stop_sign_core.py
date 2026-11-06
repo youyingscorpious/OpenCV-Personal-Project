@@ -31,40 +31,40 @@ COLOR_ORDER = "BGR"
 # 预处理
 USE_GAUSSIAN = True
 GAUSSIAN_KERNEL = (3, 3)
-MORPH_KERNEL_SIZE = 3          # 噪声大时可改成 5；越小距离估计越准
+MORPH_KERNEL_SIZE = 3  # 噪声大时可改成 5；越小距离估计越准
 
 # 候选筛选
-MIN_AREA_RATIO = 0.0025        # 最小面积占整帧比例（640x480 下约 768 px）
-MAX_AREA_RATIO = 0.45          # 未确认时限制大块红色；场景干净可放宽
+MIN_AREA_RATIO = 0.0025  # 最小面积占整帧比例（640x480 下约 768 px）
+MAX_AREA_RATIO = 0.45  # 未确认时限制大块红色；场景干净可放宽
 MAX_AREA_RATIO_CONFIRMED = 0.75  # 已确认跟踪后允许牌子贴近、变大
 MIN_ASPECT = 0.60
 MAX_ASPECT = 1.65
-MIN_EXTENT = 0.52              # 轮廓面积 / 外接矩形面积
-MIN_SOLIDITY = 0.82            # 轮廓面积 / 凸包面积
-APPROX_EPSILON = 0.02          # approxPolyDP 的 epsilon / 周长
+MIN_EXTENT = 0.52  # 轮廓面积 / 外接矩形面积
+MIN_SOLIDITY = 0.82  # 轮廓面积 / 凸包面积
+APPROX_EPSILON = 0.025  # approxPolyDP 的 epsilon / 周长
 MIN_VERTICES = 6
 MAX_VERTICES = 10
 
 # 白边/白字验证
-WHITE_CHECK_HARD = True        # True：白区不足直接拒绝；False：只作为加分项
-WHITE_MIN_RATIO = 0.015        # 白区像素 / 轮廓面积
-WHITE_LOWER = (0, 0, 160)
-WHITE_UPPER = (180, 70, 255)
+WHITE_CHECK_HARD = True  # True：白区不足直接拒绝；False：只作为加分项
+WHITE_MIN_RATIO = 0.015  # 白区像素 / 轮廓面积
+WHITE_LOWER = (0, 0, 90)
+WHITE_UPPER = (180, 110, 255)
 
 # 多帧确认与跟踪
-WINDOW = 10                    # 投票窗口帧数
-MIN_VOTES = 6                  # 窗口内至少命中几帧才确认
-LOST_TOLERANCE = 6             # 已确认后连续丢帧几帧才取消
-SMOOTH_ALPHA = 0.65            # 中心位置平滑
-SMOOTH_BETA = 0.30             # 中心速度修正
-SIZE_ALPHA = 0.50              # 宽高平滑
-SIZE_BETA = 0.15               # 宽高速度修正（车子接近时框会快速变大）
+WINDOW = 10  # 投票窗口帧数
+MIN_VOTES = 6  # 窗口内至少命中几帧才确认
+LOST_TOLERANCE = 6  # 已确认后连续丢帧几帧才取消
+SMOOTH_ALPHA = 0.65  # 中心位置平滑
+SMOOTH_BETA = 0.30  # 中心速度修正
+SIZE_ALPHA = 0.50  # 宽高平滑
+SIZE_BETA = 0.15  # 宽高速度修正（车子接近时框会快速变大）
 
 # ROI
-ROI_SCALE = 1.8                # ROI 宽度约为框宽的 1.8 倍
+ROI_SCALE = 1.8  # ROI 宽度约为框宽的 1.8 倍
 ROI_MARGIN = 16
 ROI_MIN_SIZE = 24
-ROI_PREDICT = 2.0              # 用几帧的速度预测 ROI 中心
+ROI_PREDICT = 2.0  # 用几帧的速度预测 ROI 中心
 
 # 阈值数组只创建一次，避免每帧分配
 RED_LO1 = np.array(RED_LOWER1, dtype=np.uint8)
@@ -128,8 +128,7 @@ def whiteRatio(view, contour, rect, area):
     try:
         cmask = np.zeros((h, w), dtype=np.uint8)
         try:
-            cv2.drawContours(cmask, [contour], -1, 255, -1,
-                             offset=(-x, -y))
+            cv2.drawContours(cmask, [contour], -1, 255, -1, offset=(-x, -y))
         except Exception:
             # 部分 CanMV cv2 不支持 offset；手工平移后画到小 mask
             shifted = _shiftedContour(contour, x, y)
@@ -160,17 +159,13 @@ def scoreCandidate(w, h, extent, solidity, vertices, white):
     sscore = min(1.0, max(0.0, (solidity - 0.80) / 0.20))
     wscore = min(1.0, white / 0.08)
 
-    return (
-        0.30 * vscore
-        + 0.20 * ascore
-        + 0.15 * escore
-        + 0.15 * sscore
-        + 0.20 * wscore
-    )
+    """加权算分，vscore/ascore/extent/solidity/white 分别占 30%/20%/15%/15%/20%。"""
+    return 0.30 * vscore + 0.20 * ascore + 0.15 * escore + 0.15 * sscore + 0.20 * wscore
 
 
-def findStopCandidates(view, fullArea, offset=(0, 0), collectDebug=False,
-                       maxAreaRatio=MAX_AREA_RATIO):
+def findStopCandidates(
+    view, fullArea, offset=(0, 0), collectDebug=False, maxAreaRatio=MAX_AREA_RATIO
+):
     """在 HSV 图（或 ROI 子图）中找红色八角候选。
 
     返回 (candidates, mask, rejected)。
@@ -180,9 +175,7 @@ def findStopCandidates(view, fullArea, offset=(0, 0), collectDebug=False,
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, KERNEL)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, KERNEL)
 
-    contours, _ = cv2.findContours(
-        mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not collectDebug:
         # 实时模式不再需要整帧 mask，尽早释放给后面的候选验证
         mask = None
@@ -372,7 +365,12 @@ class StopTracker:
             seed = voteRect(self.history)
             if seed is None:
                 return False
-            self.state = [float(seed[0]), float(seed[1]), float(seed[2]), float(seed[3])]
+            self.state = [
+                float(seed[0]),
+                float(seed[1]),
+                float(seed[2]),
+                float(seed[3]),
+            ]
             self.velocity = [0.0, 0.0, 0.0, 0.0]
             self.confirmed = True
             self.miss = 0
@@ -446,9 +444,7 @@ class StopDetector:
 
         fullArea = frame.shape[0] * frame.shape[1]
         maxRatio = (
-            MAX_AREA_RATIO_CONFIRMED
-            if self.tracker.confirmed
-            else MAX_AREA_RATIO
+            MAX_AREA_RATIO_CONFIRMED if self.tracker.confirmed else MAX_AREA_RATIO
         )
         roi = self.tracker.roi(frame.shape[1], frame.shape[0])
 
@@ -489,15 +485,15 @@ class StopDetector:
             "cy": -1,
             "w": 0,
             "h": 0,
-            "confidence": min(100, int(round(self.tracker.lastScore * 100)))
-            if confirmed
-            else 0,
+            "confidence": (
+                min(100, int(round(self.tracker.lastScore * 100))) if confirmed else 0
+            ),
             "fps": 0.0,
             "proc_ms": 0.0,
             "candidate_count": len(candidates),
-            "candidate_score": min(100, int(round(bestScore * 100)))
-            if best is not None
-            else 0,
+            "candidate_score": (
+                min(100, int(round(bestScore * 100))) if best is not None else 0
+            ),
         }
 
         if rect is not None:
@@ -520,9 +516,7 @@ class StopDetector:
 
 def _label(frame, text, x, y):
     """带黑色底的文字，避免背景颜色干扰读数。"""
-    (tw, th), base = cv2.getTextSize(
-        text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
-    )
+    (tw, th), base = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
     ty = y - 6
     if ty - th < 0:
         ty = y + th + 8

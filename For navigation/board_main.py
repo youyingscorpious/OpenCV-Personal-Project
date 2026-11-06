@@ -2,8 +2,8 @@
 """
 board_main.py — 庐山派 Lite-K230D → PC UDP 图像流（CanMV v1.8）
 
-通道 1：CSI1，PnP 用（可选，默认关闭）
-通道 2：CSI2，color + STOP 共用，JPEG q75
+通道 1：CSI1，color + STOP 共用，JPEG q75（默认）
+通道 2：CSI2，PnP/备用（可选，默认关闭）
 
 流程：
   1. 连 2.4G 热点
@@ -30,25 +30,24 @@ from media.media import *
 WIFI_SSID = "你的热点名称"
 WIFI_PASSWORD = "你的热点密码"
 
-CSI_PNP = 1        # 通道 1 接 CSI1
-CSI_COLOR = 2      # 通道 2 接 CSI2
+CSI_PNP = 1        # 逻辑通道 1 -> 物理 CSI1（默认 color + STOP）
+CSI_COLOR = 2      # 逻辑通道 2 -> 物理 CSI2（PnP/备用，默认关闭）
 CSI_FOR_CH = {1: CSI_PNP, 2: CSI_COLOR}
 
-# CSI1 开关：color 和 STOP 都走 CSI2 时设为 False，板子不初始化 CSI1，
-# 采集/编码/发送时间全部让给 CSI2，ch2 有效帧率约翻倍。
-# 需要 PnP 时改回 True。
-ENABLE_CSI1 = False
-ENABLE_CSI2 = True
+# 默认只用 CSI1：color 和 STOP 都走这一路。
+# 需要 PnP/第二路时，再打开 ENABLE_CSI2，并把逻辑通道 2 映射到 CSI2。
+ENABLE_CSI1 = True
+ENABLE_CSI2 = False
 
 # 每路开关：False 的路完全不初始化
 CAM_ENABLED = {
-    1: ENABLE_CSI1,   # CSI1 / PnP
-    2: ENABLE_CSI2,   # CSI2 / color + STOP
+    1: ENABLE_CSI1,   # CSI1 / color + STOP
+    2: ENABLE_CSI2,   # CSI2 / PnP / 备用
 }
 
 WIDTH = 640
 HEIGHT = 480
-QUALITY = {1: 60, 2: 75}
+QUALITY = {1: 75, 2: 75}
 TARGET_FPS = 15
 
 BOARD_PORT = 5000

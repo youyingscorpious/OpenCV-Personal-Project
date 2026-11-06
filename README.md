@@ -1,11 +1,11 @@
 # vision_nav — 三岔路口色卡 + STOP 牌（PC 端）
 
-庐山派只负责采集和发图；PC 端用 `pc_receiver` 收图，两个识别模块共用 CSI2 一路画面。
+庐山派只负责采集和发图；PC 端用 `pc_receiver` 收图，两个识别模块共用 CSI1 一路画面。
 导航组只 import `nav_vision`，同进程调用，不走 UDP。
 
 ```
 庐山派 board_main.py ──UDP 5002──> PC pc_receiver ──> nav_vision
-   CSI2 前视 640x480 q75                                ├─ color_core   → 1/2/3
+   CSI1 前视 640x480 q75                                ├─ color_core   → 1/2/3
                                                         └─ stop_sign_core → 1/0
 ```
 
@@ -18,7 +18,7 @@
 | `stop_sign_core.py` | STOP 牌核心，原样复制 |
 | `pc_receiver.py` | 板端 UDP 图像流接收 API，原样复制 |
 | `main.py` | PC 调试入口：单窗口同时画色卡框和 STOP 框 |
-| `board_main.py` | 板端副本，只增加了 `ENABLE_CSI1` 开关 |
+| `board_main.py` | 板端副本，默认只开 CSI1 |
 | `selftest.py` | 无硬件自测：合成色卡 / STOP 牌，验证两个核心和字符串契约 |
 
 ## 一、板端
@@ -29,18 +29,22 @@
 WIFI_SSID = "你的热点名称"
 WIFI_PASSWORD = "你的热点密码"
 
-ENABLE_CSI1 = False   # color 和 STOP 都用 CSI2；关掉 CSI1 让帧率翻倍
-ENABLE_CSI2 = True
+CSI_PNP = 1        # 逻辑通道 1 -> 物理 CSI1
+CSI_COLOR = 2      # 逻辑通道 2 -> 物理 CSI2（默认关闭）
+
+ENABLE_CSI1 = True    # 默认只用 CSI1：color + STOP
+ENABLE_CSI2 = False   # CSI2 留给 PnP/备用
 ```
 
-需要 PnP 时把 `ENABLE_CSI1` 改回 `True`，PNP 仍走通道 1，不影响通道 2。
+需要 PnP/第二路时，把 `ENABLE_CSI2` 改 `True`，并让逻辑通道 2 指向物理 CSI2；
+PC 端同时改用通道 2。
 
 正常日志：
 
 ```
-[board] cameras c1=off c2=on, 640x480, q1=60 q2=75
-[board] CSI2 configured (640x480)
-[board] c2 JPEG self-test ok: 3xxxx bytes
+[board] cameras c1=on c2=off, 640x480, q1=75 q2=75
+[board] CSI1 configured (640x480)
+[board] c1 JPEG self-test ok: 3xxxx bytes
 [board] waiting for PC HELLO ...
 [board] PC registered: ('192.168.x.y', 5002)
 ```
@@ -61,7 +65,7 @@ pip install opencv-python numpy
 ## 三、调试
 
 ```bash
-python main.py                                  # 读板端 ch2
+python main.py                                  # 读板端 ch1
 python main.py --board-ip 192.168.209.193       # 收不到广播时直连
 python main.py --source 0                       # 本地摄像头
 python main.py --source test.mp4                # 视频
@@ -90,6 +94,64 @@ b = nv.stop()       # "1" 有 STOP / "0" 无 / "fuck" 故障
 
 首次调用 `color()` 只激活色卡检测；首次调用 `stop()` 只激活 STOP 检测；
 `nv.start()` 可以一次激活两者。
+
+### 广播连不上时：单播扫描（默认）
+
+手机热点、AP 隔离、虚拟机 NAT、防火墙都可能过滤 UDP 广播，但单播通常没问题。
+`nav_vision` 在没有 `board_ip` 时默认对 PC 所在 /24 做单播扫描：
+
+- 每轮向默认网段（本机 /24 + `192.168.145.0/24`）的各地址发一个 `HELLO`；
+- 板子收到后开始推流；
+- PC 从第一个视频/CALR 包的源地址学习板子 IP，然后停止扫描。
+
+默认 `NAV_VISION_SCAN_SUBNET=auto,192.168.145.0/24`，会同时扫 PC 当前 /24
+和当前热点的 `192.168.145.0/24`，自动去重。PC 有 VPN/多网卡时 `auto` 可能选错，
+但显式的 `192.168.145.0/24` 仍能兜住。**换热点后前缀不同时**，把新前缀加进去：
+
+```bash
+export NAV_VISION_SCAN_SUBNET=auto,192.168.137.0/24
+```
+
+也可以只写一个网段：
+
+```bash
+export NAV_VISION_SCAN_SUBNET=192.168.145.0/24
+```
+
+关闭扫描：`NAV_VISION_SCAN_SUBNET=off`。`main.py` / `pc_receiver.py` 的
+`--scan-subnet` 默认也是 `auto,192.168.145.0/24`。
+
+### 直接指定板子 IP（兜底）
+
+如果扫描找不到，或者你知道板子 IP，在首次 `color()` / `stop()` / `start()` 之前：
+
+```python
+import nav_vision as nv
+
+nv.set_board_ip("192.168.145.222")   # 你的板子 IP
+a = nv.color()
+b = nv.stop()
+```
+
+也可以提前设置环境变量：
+
+```bash
+export NAV_VISION_BOARD_IP=192.168.145.222      # Linux / macOS
+set NAV_VISION_BOARD_IP=192.168.145.222         # Windows cmd
+```
+
+`main.py` 对应参数是 `--board-ip 192.168.145.222`。
+
+直连模式只要求板子在 IP 层可达，不依赖广播。`set_board_ip()` 必须在第一次
+`color()/stop()/start()` 之前调用；运行中要换 IP 先 `nv.close()`。
+
+广播排查：
+
+- PC 和板子是否同网段（`192.168.145.x`），`ping 192.168.145.222`。
+- 虚拟机是否桥接；NAT 模式不转发广播。
+- 防火墙是否放行 UDP 5001（发现）和 5002（视频）。
+- 抓包确认：`sudo tcpdump -ni any udp port 5001`，看有没有来自板子 IP 的包。
+- PC 有多个网卡/VPN 时，广播可能走错接口；直连按路由走，更稳。
 
 ### 返回值
 
@@ -153,7 +215,8 @@ if nv.stop() == "1":
 - 距离 `dist_mm`：当前不估距。
 - `stop_info()` / 坐标输出：只给 `color()` 和 `stop()` 两个字符串。
 - `Communication_comm.py` / UDP 结果上报：已作废，不参与本方案。
-- PnP：CSI1 默认关闭，需要时打开 `ENABLE_CSI1`。
+- PnP/第二路：默认关闭；需要时打开 `ENABLE_CSI2`，把逻辑通道 2 指向 CSI2，
+  PC 端改用通道 2。
 - 红色 STOP 牌本身也是红色块，`color()` 会把它当成红色色卡。若任务中两者可能同框，
   需要在导航层按阶段屏蔽，或给 `color_core.py` 的红色跟踪加形状过滤。
 
@@ -161,9 +224,9 @@ if nv.stop() == "1":
 
 | 现象 | 处理 |
 |---|---|
-| `color()` 一直 `"fuck"` | 看 `status()["last_error"]`；确认板端在发 ch2、防火墙放行 5001/5002 |
-| `status()["board_status"]` 是 `c2=fail` | 检查 CSI2 排线/座子；只接 CSI2 单独验证 |
+| `color()` 一直 `"fuck"` | 看 `status()["last_error"]`；确认板端在发 ch1、防火墙放行 5001/5002 |
+| `status()["board_status"]` 是 `c1=fail` | 检查 CSI1 排线/座子；只接 CSI1 单独验证 |
 | 有画面但色卡不出框 | 调小 `MIN_AREA_RATIO`，或 `--debug` 看候选/ROI |
 | 有画面但 STOP 不出框 | 看 `--debug` 的拒绝原因；检查红色阈值和白边比例 |
 | 同一台 PC 同时跑 `main.py` 和导航程序 | 端口 5001/5002 会冲突，只能留一个接收进程 |
-| 帧率只有 5–10 | 确认 `ENABLE_CSI1=False`；v1.8 双路软件 JPEG 是主要瓶颈 |
+| 帧率只有 5–10 | 确认只开了一路（`ENABLE_CSI2=False`）；v1.8 软件 JPEG 仍是瓶颈 |

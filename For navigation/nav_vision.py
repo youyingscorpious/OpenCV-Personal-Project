@@ -9,6 +9,15 @@
     b = nv.stop()     # "1" / "0" / "fuck"
     print(nv.status())
 
+广播不可用时，默认会对本机 /24 做单播扫描，一般不需要手动指定 IP。
+想强制直连，在首次 color()/stop()/start() 之前::
+
+    nv.set_board_ip("192.168.145.222")
+
+也可以设置环境变量 ``NAV_VISION_BOARD_IP``，效果相同。
+不想扫描就设 ``NAV_VISION_SCAN_SUBNET=off``；要指定网段就填
+``192.168.145.0/24``。
+
 返回值全部是字符串：
 
     color: "1"=红, "2"=黄, "3"=蓝, "0"=当前无目标, "fuck"=链路/线程故障
@@ -22,7 +31,7 @@
 不要写 ``if a:``。
 
 模块首次调用 color()/stop() 时自动启动一个后台读取线程：
-  * 只读通道 2（CSI2，前视，color 和 STOP 共用）
+  * 只读通道 1（CSI1，前视，color 和 STOP 共用）
   * 每帧顺序跑 color、stop 两个 detector
   * 任一 detector 异常只影响自己，不影响另一个
   * 超过 STALE_RESULT_S 没有新结果返回 "0"；超过 DEAD_STREAM_S 没有新帧返回 "fuck"
@@ -49,7 +58,7 @@ except ImportError as exc:
 
 
 # ==================== 对外常量 ====================
-CHANNEL = 2
+CHANNEL = 1
 
 FAIL_TEXT = "fuck"
 NO_TARGET = "0"
@@ -63,6 +72,14 @@ STOP_YES = "1"
 STALE_RESULT_S = 0.5      # 识别结果超过这么久没更新 -> "0"
 DEAD_STREAM_S = 2.0       # 完全没有新帧超过这么久 -> "fuck"
 FRAME_TIMEOUT_S = 1.0     # 单次等帧超时
+
+# 广播不可用时，可在 import 前设置环境变量，或用 set_board_ip()
+DEFAULT_BOARD_IP = os.environ.get("NAV_VISION_BOARD_IP", "").strip()
+# 没有指定 board_ip 时，默认做单播扫描；设成 "off" 可关闭
+# 默认同时扫本机 /24 和当前热点常见的 192.168.145.0/24
+SCAN_SUBNET = os.environ.get(
+    "NAV_VISION_SCAN_SUBNET", "auto,192.168.145.0/24"
+).strip() or None
 # ==================================================
 
 
@@ -119,6 +136,7 @@ class _VisionWorker(object):
         self._stop_det = None
 
         self._stream = None
+        self._board_ip = DEFAULT_BOARD_IP or None
         self._last_frame_ts = 0.0
         self._started_ts = 0.0
         self._last_error = None
@@ -142,6 +160,25 @@ class _VisionWorker(object):
                 target=self._loop, name="nav-vision", daemon=True
             )
             self._thread.start()
+
+    def set_board_ip(self, ip):
+        """指定板子 IP；必须在首次 color()/stop()/start() 之前调用。"""
+        with self._lock:
+            if self._running:
+                raise RuntimeError(
+                    "set_board_ip() 必须在首次 color()/stop()/start() 之前调用；"
+                    "运行中需要改 IP 请先 close()"
+                )
+            text = "" if ip is None else str(ip).strip()
+            self._board_ip = text or None
+
+            # 如果 pc_receiver 已经建过 transport，尽量把新 IP 写进去；
+            # 最稳妥的用法仍然是启动前设置。
+            transport = getattr(pc_receiver, "_transport", None)
+            if transport is not None:
+                transport._manual_ip = self._board_ip
+                if not transport.running:
+                    transport.board_ip = self._board_ip
 
     def close(self):
         with self._lock:
@@ -187,7 +224,15 @@ class _VisionWorker(object):
             view = self._stream
             if view is not None and not view.closed:
                 return view
-        view = pc_receiver.receiver(CHANNEL)
+            board_ip = self._board_ip
+
+        kwargs = {}
+        if board_ip:
+            kwargs["board_ip"] = board_ip
+        elif SCAN_SUBNET:
+            kwargs["scan_subnet"] = SCAN_SUBNET
+        view = pc_receiver.receiver(CHANNEL, **kwargs)
+
         with self._lock:
             self._stream = view
         return view
@@ -310,6 +355,7 @@ class _VisionWorker(object):
             fps = self._fps
             frames = self._frames
             stream = self._stream
+            configured_ip = self._board_ip
 
         board_ip = None
         board_status = None
@@ -329,7 +375,9 @@ class _VisionWorker(object):
         return {
             "running": running,
             "channel": CHANNEL,
-            "board_ip": board_ip,
+            "board_ip": board_ip if board_ip is not None else configured_ip,
+            "configured_board_ip": configured_ip,
+            "scan_subnet": SCAN_SUBNET,
             "board_status": board_status,
             "fps": round(fps, 1),
             "frames": frames,
@@ -368,8 +416,16 @@ def stop():
     return _worker.stop_value()
 
 
-def start(color=True, stop=True):
+def set_board_ip(ip):
+    """广播不可用时指定板子 IP；必须在首次 color()/stop()/start() 之前调用。"""
+    _worker.set_board_ip(ip)
+    return True
+
+
+def start(color=True, stop=True, board_ip=None):
     """提前启动后台线程（可选）；不调用也会在首次 color()/stop() 时启动。"""
+    if board_ip:
+        _worker.set_board_ip(board_ip)
     _worker.ensure(want_color=bool(color), want_stop=bool(stop))
     return True
 

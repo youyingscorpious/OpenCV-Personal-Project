@@ -6,8 +6,12 @@ pc_receiver.py — 庐山派 Lite-K230D 双摄接收 API + 演示 CLI
 API:
     from pc_receiver import receiver
 
-    video1 = receiver(1)        # PnP，CSI1
-    video2 = receiver(2)        # 颜色识别，CSI2
+    video1 = receiver(1)        # color + STOP（CSI1，默认）
+    video2 = receiver(2)        # 第二路 / PnP（CSI2，可选）
+
+    # 收不到广播时，单播扫描本机 /24（或显式指定网段）：
+    video2 = receiver(2, scan_subnet="auto")
+    video2 = receiver(2, scan_subnet="auto,192.168.145.0/24")
 
     img1 = video1()             # 阻塞，返回 BGR ndarray
     img2 = video2(timeout=1.0)
@@ -19,6 +23,7 @@ API:
 CLI:
     python pc_receiver.py --channel 1
     python pc_receiver.py --channel 2 --relay
+    python pc_receiver.py --channel 2 --scan-subnet auto
 
 依赖：pip install opencv-python numpy
 """
@@ -55,6 +60,77 @@ FRAME_TIMEOUT = 2.0
 HELLO_GAP = 1.0
 HELLO_AFTER = 2.0
 CAL_GAP = 0.15
+SCAN_INTERVAL = 1.0       # 单播扫描一轮的间隔
+# 默认同时扫：本机当前 /24 + 当前热点常见的 192.168.145.0/24。
+# 换热点后如果前缀不同，把新前缀加到这里，或用 --scan-subnet 覆盖。
+DEFAULT_SCAN_SUBNET = "auto,192.168.145.0/24"
+
+
+def _local_ip():
+    """本机默认路由的源 IP；只做 connect 选路，不实际发包。"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
+def _resolve_one_scan(item):
+    """单个网段 -> IP 列表。"""
+    text = str(item).strip().lower()
+    if not text or text in ("0", "off", "none", "false", "no"):
+        return []
+
+    if text in ("auto", "1", "true", "yes", "on"):
+        ip = _local_ip()
+        if not ip:
+            return []
+        parts = ip.split(".")
+        if len(parts) != 4 or parts[0] in ("127", "169"):
+            return []
+        prefix = ".".join(parts[:3])
+    else:
+        base = text.split("/", 1)[0]
+        parts = base.split(".")
+        if len(parts) < 3:
+            return []
+        try:
+            nums = [int(p) for p in parts[:3]]
+        except ValueError:
+            return []
+        if any(n < 0 or n > 255 for n in nums):
+            return []
+        prefix = ".".join(str(n) for n in nums)
+
+    return ["%s.%d" % (prefix, i) for i in range(1, 255)]
+
+
+def _resolve_scan_hosts(spec):
+    """把 scan_subnet 解析成待扫描 IP 列表；关闭时返回 []。
+
+    spec 支持逗号/分号分隔多个网段，自动去重：
+      "auto,192.168.145.0/24"
+      "192.168.145.0/24;192.168.137.0/24"
+      "auto" / "192.168.145.0/24" / "192.168.145" / "off"
+    """
+    if not spec:
+        return []
+    text = str(spec).strip()
+    if not text:
+        return []
+
+    items = [s.strip() for s in text.replace(";", ",").split(",") if s.strip()]
+    out = []
+    seen = set()
+    for item in items:
+        for ip in _resolve_one_scan(item):
+            if ip not in seen:
+                seen.add(ip)
+                out.append(ip)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -134,7 +210,7 @@ class _Channel:
 # --------------------------------------------------------------------------
 class _Transport:
     def __init__(self, disc_port=5001, pc_port=5002, board_port=5000,
-                 board_ip=None):
+                 board_ip=None, scan_subnet=None):
         self.disc_port = disc_port
         self.pc_port = pc_port
         self.board_port = board_port
@@ -145,6 +221,9 @@ class _Transport:
         self._manual_ip = board_ip
         self.board_ip = board_ip
         self.board_status = None
+        self.scan_subnet = scan_subnet
+        self.scan_hosts = []
+        self.last_scan = 0.0
         self.offset = None
         self.cal_samples = []
         self.cal_sent = 0
@@ -191,6 +270,16 @@ class _Transport:
                 self.last_frame = 0.0
                 self.last_hello = 0.0
 
+            # 没有手动 IP 时才做单播扫描；有 board_ip 就直接单播
+            if self._manual_ip:
+                self.scan_hosts = []
+            else:
+                self.scan_hosts = _resolve_scan_hosts(self.scan_subnet)
+            self.last_scan = 0.0
+            if self.scan_hosts:
+                print("[scan] unicast HELLO sweep %s (%d hosts)"
+                      % (self.scan_subnet, len(self.scan_hosts)))
+
             disc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             data = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
@@ -236,21 +325,36 @@ class _Transport:
 
     # ---- 后台循环 ----
     def _loop(self):
-        while self.running:
-            now = time.perf_counter()
-            self._discover()
-            self._hello(now)
-            self._cal(now)
-            try:
-                pkt, _src = self.data.recvfrom(MAX_PKT)
-            except OSError:
-                continue
-            self._packet(pkt, time.perf_counter())
+        try:
+            while self.running:
+                now = time.perf_counter()
+                self._discover()
+                self._hello(now)
+                self._scan(now)
+                self._cal(now)
+
+                # stop() 可能把 self.data 置空；先取本地引用，避免竞态
+                data = self.data
+                if data is None:
+                    time.sleep(0.02)
+                    continue
+                try:
+                    pkt, _src = data.recvfrom(MAX_PKT)
+                except OSError:
+                    continue
+                self._packet(pkt, time.perf_counter(), _src)
+        finally:
+            # 线程因任何原因退出后，允许下一次 receiver() 重新启动
+            with self._state_lock:
+                self.running = False
 
     def _discover(self):
+        disc = self.disc
+        if disc is None:
+            return
         while True:
             try:
-                pkt, src = self.disc.recvfrom(256)
+                pkt, src = disc.recvfrom(256)
             except OSError:
                 break
             if not pkt.startswith(b"HERE"):
@@ -267,12 +371,35 @@ class _Transport:
     def _hello(self, now):
         if not self.board_ip:
             return
+        data = self.data
+        if data is None:
+            return
         if now - self.last_frame > HELLO_AFTER and now - self.last_hello > HELLO_GAP:
             try:
-                self.data.sendto(b"HELLO", (self.board_ip, self.board_port))
+                data.sendto(b"HELLO", (self.board_ip, self.board_port))
             except OSError:
                 return
             self.last_hello = now
+
+    def _scan(self, now):
+        """还不知道板子 IP 时，对同网段每个地址发单播 HELLO。
+
+        板子收到 HELLO 后会记下 PC 的源地址并开始推流；PC 从第一个
+        有效视频/CALR 包的源地址学习板子 IP，然后停止扫描。
+        """
+        if self.board_ip or not self.scan_hosts:
+            return
+        if now - self.last_scan < SCAN_INTERVAL:
+            return
+        self.last_scan = now
+        data = self.data
+        if data is None:
+            return
+        for ip in self.scan_hosts:
+            try:
+                data.sendto(b"HELLO", (ip, self.board_port))
+            except OSError:
+                pass
 
     def _cal(self, now):
         if not self.board_ip or self.last_frame <= 0 or self.offset is not None:
@@ -281,9 +408,12 @@ class _Transport:
             return
         if now - self.last_cal < CAL_GAP:
             return
+        data = self.data
+        if data is None:
+            return
         t1 = time.perf_counter()
         try:
-            self.data.sendto(
+            data.sendto(
                 b"CAL" + struct.pack("<d", t1),
                 (self.board_ip, self.board_port),
             )
@@ -292,7 +422,20 @@ class _Transport:
         self.cal_sent += 1
         self.last_cal = now
 
-    def _packet(self, pkt, rx):
+    def _packet(self, pkt, rx, src=None):
+        # 单播扫描模式：从第一个有效包的源地址学习板子 IP
+        if src is not None:
+            is_calr = pkt[:4] == b"CALR" and len(pkt) >= 16
+            is_video = pkt[:2] == MAGIC and len(pkt) >= HDR_LEN
+            if is_calr or is_video:
+                ip = src[0]
+                with self.cond:
+                    changed = ip != self.board_ip
+                    if changed:
+                        self.board_ip = ip
+                if changed:
+                    print("[pc] board %s (unicast scan)" % ip)
+
         if pkt[:4] == b"CALR" and len(pkt) >= 16:
             t1, = struct.unpack_from("<d", pkt, 4)
             tb, = struct.unpack_from("<I", pkt, 12)
@@ -438,7 +581,9 @@ class CameraStream:
                 remain = deadline - time.perf_counter()
                 if remain <= 0:
                     if self._t.board_ip is None:
-                        raise TimeoutError("未发现板子（收不到 HERE 广播）")
+                        raise TimeoutError(
+                            "未发现板子（HERE 广播 / 单播扫描均无响应）"
+                        )
                     raise TimeoutError(
                         "通道 %d 在 %.1fs 内没有新帧" % (self.channel, timeout)
                     )
@@ -473,7 +618,10 @@ def receiver(channel=1, **transport_kwargs):
 
     transport_kwargs 只在第一次调用、创建共享 transport 时生效：
         disc_port=5001, pc_port=5002, board_port=5000,
-        board_ip=None  # 指定后跳过广播发现，直接向该 IP 发 HELLO
+        board_ip=None,        # 指定后跳过广播发现，直接向该 IP 发 HELLO
+        scan_subnet=None      # 无 board_ip 时的单播扫描网段：
+                              #   None/off 关闭；"auto" 扫本机 /24；
+                              #   "auto,192.168.145.0/24" 可逗号分隔多个
     """
     if channel not in CHANNELS:
         raise ValueError("channel 必须是 1 或 2")
@@ -622,13 +770,16 @@ def save_frame(frame, save_dir):
 
 def parse_args():
     p = argparse.ArgumentParser(description="K230 dual-camera receiver")
-    p.add_argument("--channel", choices=("auto", "1", "2"), default="auto",
-                   help="auto=自动选有画面的那一路（默认），或强制 1/2")
+    p.add_argument("--channel", choices=("auto", "1", "2"), default="1",
+                   help="默认 1（CSI1）；auto=自动选有画面的那一路，或强制 1/2")
     p.add_argument("--pc-port", type=int, default=5002)
     p.add_argument("--board-port", type=int, default=5000)
     p.add_argument("--disc-port", type=int, default=5001)
     p.add_argument("--board-ip", default=None,
                    help="跳过广播发现，直接连这个板子 IP（例如 192.168.209.193）")
+    p.add_argument("--scan-subnet", default=DEFAULT_SCAN_SUBNET,
+                   help="无 --board-ip 时单播扫描的网段，可逗号分隔多个："
+                        "auto,192.168.145.0/24 / 192.168.137.0/24 / off")
     p.add_argument("--relay", action="store_true")
     p.add_argument("--relay-port", type=int, default=8080)
     p.add_argument("--no-gui", action="store_true",
@@ -663,14 +814,15 @@ def main():
                 pc_port=args.pc_port,
                 board_port=args.board_port,
                 board_ip=args.board_ip,
+                scan_subnet=args.scan_subnet,
             )
     except OSError as e:
         print("[pc] 绑定端口失败:", e, file=sys.stderr)
         return 1
 
     mode_txt = "auto" if args.channel == "auto" else args.channel
-    print("[pc] channel=%s, disc=%d video=%d (q 退出，s 存帧)"
-          % (mode_txt, args.disc_port, args.pc_port))
+    print("[pc] channel=%s, disc=%d video=%d scan=%s (q 退出，s 存帧)"
+          % (mode_txt, args.disc_port, args.pc_port, args.scan_subnet))
 
     current = None
     active = None
